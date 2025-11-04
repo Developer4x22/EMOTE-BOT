@@ -1,30 +1,46 @@
-import requests , os , psutil , sys , jwt , pickle , json , binascii , time , urllib3 , base64 , datetime , re , socket , threading , ssl , pytz , aiohttp
+
+import requests, os, psutil, sys, jwt, pickle, json, binascii, time, urllib3, base64, datetime, re, socket, threading, ssl, pytz, aiohttp
 from protobuf_decoder.protobuf_decoder import Parser
-from xC4 import * ; from xHeaders import *
+from xC4 import * 
+from xHeaders import *
 from datetime import datetime
+
+# Global key/iv and API queue
+key = None
+iv = None
+
 from google.protobuf.timestamp_pb2 import Timestamp
 from concurrent.futures import ThreadPoolExecutor
 from threading import Thread
-from Pb2 import DEcwHisPErMsG_pb2 , MajoRLoGinrEs_pb2 , PorTs_pb2 , MajoRLoGinrEq_pb2 , sQ_pb2 , Team_msg_pb2
+from Pb2 import DEcwHisPErMsG_pb2, MajoRLoGinrEs_pb2, PorTs_pb2, MajoRLoGinrEq_pb2, sQ_pb2, Team_msg_pb2
 from cfonts import render, say
 from aiohttp import web
+import asyncio
 
-# ----------- API HANDLER -----------
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  
+
+# Asyncio queue for API -> bot commands
+api_command_queue = asyncio.Queue()
+
+# ----------- API HANDLER (aiohttp) -----------
 async def api_handler(request):
     teamcode = request.rel_url.query.get('teamcode')
 
     if not teamcode:
         return web.json_response({"status": "error", "message": "Missing teamcode"}, status=400)
 
+    # ensure bot is ready
+    if key is None or iv is None or whisper_writer is None or online_writer is None:
+        return web.json_response({"status": "error", "message": "Bot not ready (key/iv or writers missing)"}, status=503)
+
     try:
-        # একই কাজ যা /x/ কমান্ড করে
-        EM = await GenJoinSquadsPacket(teamcode, key, iv)
-        await SEndPacKeT(whisper_writer, online_writer, 'OnLine', EM)
-        return web.json_response({"status": "success", "message": f"Joined team {teamcode}"})
+        # queue the teamcode for the bot to process
+        await api_command_queue.put(("join_team", teamcode))
+        return web.json_response({"status": "success", "message": f"Queued join for team {teamcode}"})
     except Exception as e:
         return web.json_response({"status": "error", "message": str(e)})
 
-# ----------- SERVER START -----------
+# ----------- SERVER START  (aiohttp) -----------
 async def start_api_server():
     app = web.Application()
     app.router.add_get('/api', api_handler)
@@ -32,35 +48,7 @@ async def start_api_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8080)  # 8080 port এ চলবে
     await site.start()
-    print("[✅] API server running on http://localhost:8080/api?teamcode=123456")
-#EMOTES BY PARAHEX X CODEX
-
-
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)  
-
-# --- ADDED FOR FLASK API INTEGRATION ---
-from flask import Flask, request, jsonify
-import queue as _queue, threading as _threading
-
-# thread-safe queue for commands (Flask -> async bot)
-api_command_queue = _queue.Queue()
-
-flask_app = Flask(__name__)
-@flask_app.route('/', methods=['GET'])
-@flask_app.route('/join', methods=['GET'])
-def join_team():
-    teamcode = request.args.get('teamcode')
-    if not teamcode:
-        return jsonify({"ok": False, "error": "missing teamcode param (use ?teamcode=...)"}), 400
-    api_command_queue.put(("join_team", teamcode))
-    return jsonify({"ok": True, "queued": True, "teamcode": teamcode}), 200
-
-def run_flask():
-    # run flask on 0.0.0.0:5000; change host/port if needed
-    flask_app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
-# -------------------------------------------
-
+    print("[✅] API server running on http://0.0.0.0:8080/api?teamcode=123456")
 
 # VariabLes dyli 
 #------------------------------------------#
@@ -84,6 +72,8 @@ Hr = {
     'X-GA': "v1 1",
     'ReleaseVersion': "OB51"}
 
+import random  # ensure random is imported for get_random_color
+
 # ---- Random Colores ----
 def get_random_color():
     colors = [
@@ -100,9 +90,9 @@ def get_random_color():
     return random.choice(colors)
 
 async def encrypted_proto(encoded_hex):
-    key = b'Yg&tc%DEuh6%Zc^8'
-    iv = b'6oyZDr22E3ychjM%'
-    cipher = AES.new(key, AES.MODE_CBC, iv)
+    key_local = b'Yg&tc%DEuh6%Zc^8'
+    iv_local = b'6oyZDr22E3ychjM%'
+    cipher = AES.new(key_local, AES.MODE_CBC, iv_local)
     padded_message = pad(encoded_hex, AES.block_size)
     encrypted_payload = cipher.encrypt(padded_message)
     return encrypted_payload
@@ -332,16 +322,21 @@ async def TcPChaT(ip, port, AutHToKen, key, iv, LoGinDaTaUncRypTinG, ready_event
             await whisper_writer.drain()
             ready_event.set()
 
-            # --- ADDED: Check Flask API queue right after connection ready ---
+            # --- ADDED: Check API queue right after connection ready ---
             try:
                 while not api_command_queue.empty():
                     cmd_type, payload = api_command_queue.get_nowait()
                     if cmd_type == "join_team":
                         teamcode = payload
                         try:
-                            EM = await GenJoinSquadsPacket(teamcode , key , iv)
-                            await SEndPacKeT(whisper_writer , online_writer , 'OnLine' , EM)
-                            print(f"[API] Sent join squad packet for teamcode: {teamcode}")
+                            if key is None or iv is None:
+                                print(f"[API] key/iv not ready for team {teamcode}")
+                            elif whisper_writer is None or online_writer is None:
+                                print(f"[API] writers not ready for team {teamcode}")
+                            else:
+                                EM = await GenJoinSquadsPacket(teamcode , key , iv)
+                                await SEndPacKeT(whisper_writer , online_writer , 'OnLine' , EM)
+                                print(f"[API] Sent join squad packet for teamcode: {teamcode}")
                         except Exception as e:
                             print(f"[API] Error sending join for {teamcode}: {e}")
                     else:
@@ -397,8 +392,6 @@ async def TcPChaT(ip, port, AutHToKen, key, iv, LoGinDaTaUncRypTinG, ready_event
                                 await SEndPacKeT(whisper_writer , online_writer , 'OnLine' , E)
                             except:
                                 print('msg in squad')
-
-
 
                         if inPuTMsG.startswith('/x/'):
                             CodE = inPuTMsG.split('/x/')[1]
@@ -560,8 +553,6 @@ async def TcPChaT(ip, port, AutHToKen, key, iv, LoGinDaTaUncRypTinG, ready_event
                             
             whisper_writer.close() ; await whisper_writer.wait_closed() ; whisper_writer = None
                     
-                    	
-                    	
         except Exception as e: print(f"ErroR {ip}:{port} - {e}") ; whisper_writer = None
         await asyncio.sleep(reconnect_delay)
 
@@ -583,6 +574,7 @@ async def MaiiiinE():
 
     ToKen = MajoRLoGinauTh.token
     TarGeT = MajoRLoGinauTh.account_uid
+    global key, iv
     key = MajoRLoGinauTh.key
     iv = MajoRLoGinauTh.iv
     timestamp = MajoRLoGinauTh.timestamp
@@ -615,6 +607,7 @@ async def MaiiiinE():
     print(f" - Subscribe > Spideerio | Gaming ! (:")    
     api_task = asyncio.create_task(start_api_server())
     await asyncio.gather(task1, task2, api_task)
+
 async def StarTinG():
     while True:
         try: await asyncio.wait_for(MaiiiinE() , timeout = 7 * 60 * 60)
@@ -622,8 +615,4 @@ async def StarTinG():
         except Exception as e: print(f"ErroR TcP - {e} => ResTarTinG ...")
 
 if __name__ == '__main__':
-    # start flask in a daemon thread so it won't block bot
-    flask_thread = _threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-
     asyncio.run(StarTinG())
